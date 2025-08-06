@@ -182,3 +182,5 @@ cython_debug/
 cache/stats.db
 /cache
 /cache
+/cache
+cache/stats.db

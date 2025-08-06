@@ -193,11 +193,19 @@ class ChessBoardWidget(QWidget, ThemeMixin):
     def get_fen(self) -> str:
         return self.board.fen()
 
-    def set_fen(self, fen: str):
+    def set_fen(self, fen: str, trigger_callback: bool = True):
         try:
+            old_fen = self.board.fen() if self.board else None
             self.board = chess.Board(fen)
             self.selected_square = None
             self.update()
+            
+            # Log FEN change for debugging
+            if old_fen != fen:
+                logger.info(f"Board FEN changed from {old_fen[:50]}... to {fen[:50]}...")
+            
+            if trigger_callback and self.move_callback:
+                self.move_callback()
         except Exception as exc:  # pragma: no‑cover – defensive
             logger.error("Bad FEN supplied to board: %s", exc)
 
@@ -723,6 +731,9 @@ class StatsTable(QTableWidget):
         
         # Store the board position used for populating the table
         self.population_board = current_board
+        self.population_fen = current_board.fen()
+        
+        logger.info(f"Populating table with {len(stats)} moves for FEN: {self.population_fen[:50]}...")
         
         for r, s in enumerate(stats):
             # Calculate win rate for color coding
@@ -731,12 +742,27 @@ class StatsTable(QTableWidget):
             # Format evaluation score as +0.23 or -0.45
             score_str = f"{s.evaluation_score/100:+.2f}" if s.evaluation_score != 0 else "0.00"
             
-            # Convert UCI move to SAN notation using current board position
+            # Convert UCI move to SAN notation using population board position
             try:
                 move = chess.Move.from_uci(s.move)
-                san_move = current_board.san(move)
-            except Exception:
+                # Use population board for consistent SAN conversion
+                if hasattr(self, 'population_board') and self.population_board:
+                    if move in self.population_board.legal_moves:
+                        san_move = self.population_board.san(move)
+                    else:
+                        # Move not legal for population board, use UCI as fallback
+                        logger.warning(f"Move {s.move} is not legal for population board position")
+                        san_move = s.move
+                else:
+                    # Fallback to current board if population board not available
+                    if move in current_board.legal_moves:
+                        san_move = current_board.san(move)
+                    else:
+                        logger.warning(f"Move {s.move} is not legal for current position")
+                        san_move = s.move
+            except Exception as e:
                 # Fallback to UCI if conversion fails
+                logger.error(f"Failed to convert UCI move {s.move} to SAN: {e}")
                 san_move = s.move
             
             items = [
@@ -938,10 +964,70 @@ class StatsTable(QTableWidget):
                 try:
                     # Convert UCI move to chess.Move object
                     move = chess.Move.from_uci(move_uci)
-                    # Play the move on the board
-                    self.board_widget.push_move(move)
+                    
+                    # Get current and population board states
+                    current_board = chess.Board(self.board_widget.get_fen())
+                    current_fen = self.board_widget.get_fen()
+                    population_fen = getattr(self, 'population_fen', "N/A")
+                    
+                    logger.info(f"Table click: Move {move_uci} from row {row}")
+                    logger.info(f"Current board FEN: {current_fen[:50]}...")
+                    logger.info(f"Population board FEN: {population_fen[:50]}...")
+                    
+                    # Check if board states match
+                    if current_fen == population_fen:
+                        # Board states match, move should be valid
+                        if move in current_board.legal_moves:
+                            self.board_widget.push_move(move)
+                            logger.info(f"Playing move {move_uci} on matching board state")
+                        else:
+                            logger.error(f"Move {move_uci} is not legal for current position despite matching FENs")
+                            return
+                    elif hasattr(self, 'population_board') and self.population_board:
+                        # Board states don't match, check if move was valid for population state
+                        if move in self.population_board.legal_moves:
+                            logger.info(f"Board state changed since table population. Resetting to population state and applying move {move_uci}")
+                            
+                            # Set the board to the state when table was populated (without triggering callback)
+                            self.board_widget.set_fen(self.population_board.fen(), trigger_callback=False)
+                            
+                            # Now apply the move
+                            self.board_widget.push_move(move)
+                            logger.info(f"Successfully applied move {move_uci} after resetting board state")
+                        else:
+                            logger.error(f"Move {move_uci} is not legal for population board state either")
+                            return
+                    else:
+                        # No population board context, try anyway but log warning
+                        logger.warning(f"No population board context available, attempting move {move_uci} anyway")
+                        if move in current_board.legal_moves:
+                            self.board_widget.push_move(move)
+                        else:
+                            logger.error(f"Move {move_uci} is not legal for current board state")
+                            return
+                        
                 except Exception as e:
                     logger.error(f"Failed to play move {move_uci}: {e}")
+
+    def is_synchronized_with_board(self):
+        """Check if the table is synchronized with the current board state."""
+        if not self.board_widget or not hasattr(self, 'population_fen'):
+            return False
+        
+        current_fen = self.board_widget.get_fen()
+        return current_fen == self.population_fen
+    
+    def get_board_state_info(self):
+        """Get debug information about board state synchronization."""
+        current_fen = self.board_widget.get_fen() if self.board_widget else "N/A"
+        population_fen = getattr(self, 'population_fen', "N/A")
+        
+        return {
+            'current_fen': current_fen[:50] + "..." if len(current_fen) > 50 else current_fen,
+            'population_fen': population_fen[:50] + "..." if len(population_fen) > 50 else population_fen,
+            'synchronized': current_fen == population_fen,
+            'move_count': len(self.move_data) if self.move_data else 0
+        }
 
 
 # ---------------------------------------------------------------------------
