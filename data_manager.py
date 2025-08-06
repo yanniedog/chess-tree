@@ -1327,7 +1327,7 @@ class DataManager:
         except Exception as e:
             logger.error(f"Error updating statistics: {e}")
     
-    def _generate_sample_stats(self, fen: str, network: str = None) -> List[MoveStats]:
+    def _generate_sample_stats(self, fen: str, network: str = None, min_games: int = 0) -> List[MoveStats]:
         """Generate sample statistics for demonstration"""
         try:
             board = chess.Board(fen)
@@ -1338,6 +1338,10 @@ class DataManager:
                 sample_stat = self._generate_sample_stat_for_move(fen, move, network)
                 if sample_stat:
                     stats.append(sample_stat)
+            
+            # Filter by minimum games if specified
+            if min_games > 0:
+                stats = [stat for stat in stats if stat.total_games >= min_games]
             
             return stats
             

@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
 
 # Local imports
 from config import config  # noqa: F401 – used elsewhere in project
-from data_manager import DataManager  # noqa: F401 – used elsewhere in project
+from data_manager import DataManager, MoveStats  # noqa: F401 – used elsewhere in project
 from dataset_analyzer import dataset_analyzer  # noqa: F401 – used elsewhere in project
 from utils import (
     get_logger,
@@ -97,7 +97,8 @@ class ChessBoardWidget(QWidget, ThemeMixin):
 
         self.square_size_px = 64  # will be overridden in paintEvent
         self.setMouseTracking(True)
-        self.setMinimumSize(200, 200)
+        # Set minimum size to accommodate board + labels (30px margin on left and bottom)
+        self.setMinimumSize(230, 230)  # 200 + 30 for labels
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.move_callback = None  # set by parent
@@ -177,6 +178,15 @@ class ChessBoardWidget(QWidget, ThemeMixin):
         self.square_size_px = max(24, min(128, int(64 * self.font_scale)))
         self.update()
 
+    def sizeHint(self):
+        """Return the optimal size for the chessboard including labels."""
+        # Calculate optimal size based on square size
+        board_size = self.square_size_px * 8
+        # Add margins for labels
+        total_width = board_size + 30  # 30px for left rank labels
+        total_height = board_size + 30  # 30px for bottom file labels
+        return QSize(total_width, total_height)
+
     def get_fen(self) -> str:
         return self.board.fen()
 
@@ -209,29 +219,47 @@ class ChessBoardWidget(QWidget, ThemeMixin):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Keep board square even if window stretched.
-        size = min(self.width(), self.height())
-        self.square_size_px = size // 8
-        offset_x = (self.width() - size) // 2
-        offset_y = (self.height() - size) // 2
+        # Calculate available space for the entire board including labels
+        available_width = self.width()
+        available_height = self.height()
+        
+        # Reserve space for labels (left and bottom)
+        label_margin = 30  # Space for rank labels on left
+        bottom_margin = 30  # Space for file labels at bottom
+        
+        # Calculate board size that fits within available space
+        board_width = available_width - label_margin
+        board_height = available_height - bottom_margin
+        
+        # Keep board square and fit within available space
+        board_size = min(board_width, board_height)
+        self.square_size_px = board_size // 8
+        
+        # Center the board within the available space
+        offset_x = label_margin + (board_width - board_size) // 2
+        offset_y = (board_height - board_size) // 2
 
         # Draw rank and file labels
-        label_size = 20
-        font = QFont("Arial", 10)
+        font = QFont("Arial", max(8, min(12, self.square_size_px // 6)), QFont.Weight.Bold)
         painter.setFont(font)
-        painter.setPen(QPen(self.colours["text"]))
+        
+        # Use a more visible color for the labels
+        label_color = QColor(0, 0, 0)  # Black for better contrast
+        painter.setPen(QPen(label_color, 2))  # Thicker pen for better visibility
 
         # File labels (a-h) at bottom
         for file in range(8):
             x = offset_x + file * self.square_size_px + self.square_size_px // 2
-            y = offset_y + 8 * self.square_size_px + label_size
-            painter.drawText(x - 10, y, 20, label_size, Qt.AlignmentFlag.AlignCenter, chr(97 + file))
+            y = offset_y + 8 * self.square_size_px + 25  # Position below the board
+            label_text = chr(97 + file)  # 'a' through 'h'
+            painter.drawText(x - 15, y - 15, 30, 20, Qt.AlignmentFlag.AlignCenter, label_text)
 
         # Rank labels (1-8) on left
         for rank in range(8):
-            x = offset_x - label_size
+            x = label_margin // 2  # Center in the left margin
             y = offset_y + (7 - rank) * self.square_size_px + self.square_size_px // 2
-            painter.drawText(x, y - 10, label_size, 20, Qt.AlignmentFlag.AlignCenter, str(rank + 1))
+            label_text = str(rank + 1)
+            painter.drawText(x - 10, y - 10, 20, 20, Qt.AlignmentFlag.AlignCenter, label_text)
 
         # Draw squares & pieces
         for rank in range(8):
@@ -837,6 +865,54 @@ class MainWindow(QMainWindow, ThemeMixin):
         
         return FallbackDataManager()
 
+    def _convert_lichess_to_movestats(self, lichess_data, fen):
+        """Convert Lichess API response to MoveStats objects"""
+        if not lichess_data or 'moves' not in lichess_data:
+            return []
+        
+        stats = []
+        for move_data in lichess_data['moves']:
+            # Extract data from Lichess response
+            uci_move = move_data.get('uci', '')
+            white_wins = move_data.get('white', 0)
+            black_wins = move_data.get('black', 0)
+            draws = move_data.get('draws', 0)
+            
+            # Create MoveStats object
+            stat = MoveStats(
+                fen=fen,
+                move=uci_move,
+                wins=white_wins,
+                losses=black_wins,
+                draws=draws,
+                network='lichess',
+                source_files=['lichess_api'],
+                last_updated=time.time(),
+                evaluation_score=0  # Lichess doesn't provide evaluation scores
+            )
+            stats.append(stat)
+        
+        return stats
+
+    def _fetch_lichess_stats(self, fen):
+        """Fetch and convert Lichess stats for the current position"""
+        try:
+            lichess_data = fetch_lichess_api(fen, endpoint="lichess")
+            logger.info(f"Fetched Lichess stats for FEN {fen}: {lichess_data}")
+            
+            if lichess_data and 'moves' in lichess_data:
+                # Convert to MoveStats format
+                stats = self._convert_lichess_to_movestats(lichess_data, fen)
+                self.last_lichess_data = lichess_data
+                return stats
+            else:
+                logger.warning("No moves data in Lichess response")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error fetching Lichess stats: {e}")
+            return []
+
     # ------------------------------------------------------------------
     #                               UI
     # ------------------------------------------------------------------
@@ -1249,7 +1325,15 @@ class MainWindow(QMainWindow, ThemeMixin):
                 self.status.setText("Initializing data manager...")
                 return
             
-            # Use position-specific data fetching instead of complete dataset downloads
+            # First try to get Lichess data
+            lichess_stats = self._fetch_lichess_stats(self.current_fen)
+            if lichess_stats:
+                self._update_stats_table_with_data(lichess_stats)
+                self._update_move_list_with_data(lichess_stats)
+                self.status.setText(f"Lichess data: {len(lichess_stats)} moves found")
+                return
+            
+            # Fallback to data manager
             stats = self.data_manager.get_position_stats(self.current_fen, network, min_games=min_games)
             if stats:
                 self._update_stats_table_with_data(stats)
