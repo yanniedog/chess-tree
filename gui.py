@@ -242,21 +242,21 @@ class ChessBoardWidget(QWidget, ThemeMixin):
         # Draw rank and file labels
         font = QFont("Arial", max(8, min(12, self.square_size_px // 6)), QFont.Weight.Bold)
         painter.setFont(font)
-        
-        # Use a more visible color for the labels
-        label_color = QColor(0, 0, 0)  # Black for better contrast
-        painter.setPen(QPen(label_color, 2))  # Thicker pen for better visibility
 
-        # File labels (a-h) at bottom
+        # Use 50% opacity grey for the labels
+        label_color = QColor(128, 128, 128, 128)  # 50% opacity grey (128 alpha)
+        painter.setPen(QPen(label_color, 1))  # Thinner pen for subtle appearance
+        
+        # File labels (a-h) at bottom - positioned just below the board
         for file in range(8):
             x = offset_x + file * self.square_size_px + self.square_size_px // 2
-            y = offset_y + 8 * self.square_size_px + 25  # Position below the board
+            y = offset_y + 8 * self.square_size_px + 15  # Position just below the board
             label_text = chr(97 + file)  # 'a' through 'h'
             painter.drawText(x - 15, y - 15, 30, 20, Qt.AlignmentFlag.AlignCenter, label_text)
 
-        # Rank labels (1-8) on left
+        # Rank labels (1-8) on left - positioned just to the left of the board
         for rank in range(8):
-            x = label_margin // 2  # Center in the left margin
+            x = offset_x - 15  # Position just to the left of the board
             y = offset_y + (7 - rank) * self.square_size_px + self.square_size_px // 2
             label_text = str(rank + 1)
             painter.drawText(x - 10, y - 10, 20, 20, Qt.AlignmentFlag.AlignCenter, label_text)
@@ -563,12 +563,12 @@ class StatsTable(QTableWidget):
         "Move",
         "Score",
         "Perf",
-        "Decis.",
+        "Decis",
         "Wins",
-        "Losses",
-        "Draws",
+        "Loss",
+        "Draw",
         "Total",
-        "Conf.",
+        "Conf",
     ]
 
     def __init__(self):
@@ -583,15 +583,15 @@ class StatsTable(QTableWidget):
         for i in range(len(self.HEADERS)):
             # Make all columns manually resizable
             self.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
-            # Set initial column widths
+            # Set initial column widths - more compact
             if i == 0:  # Move column
-                self.setColumnWidth(i, 80)
-            elif i == 1:  # Score column
-                self.setColumnWidth(i, 70)
-            elif i == 8:  # Confidence column
                 self.setColumnWidth(i, 60)
+            elif i == 1:  # Score column
+                self.setColumnWidth(i, 55)
+            elif i == 8:  # Confidence column
+                self.setColumnWidth(i, 45)
             else:  # Other columns
-                self.setColumnWidth(i, 80)
+                self.setColumnWidth(i, 55)
         self.setAlternatingRowColors(True)
         self.setStyleSheet(
             """
@@ -603,7 +603,7 @@ class StatsTable(QTableWidget):
                 gridline-color: #404040;
             }
             QTableWidget::item {
-                padding: 4px;
+                padding: 2px;
                 border: none;
             }
             QTableWidget::item:selected {
@@ -613,7 +613,7 @@ class StatsTable(QTableWidget):
             QHeaderView::section {
                 background: #1e1e1e;
                 color: #e0e0e0;
-                padding: 6px;
+                padding: 3px;
                 border: 1px solid #404040;
                 font-weight: bold;
             }
@@ -624,7 +624,7 @@ class StatsTable(QTableWidget):
         )
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumHeight(100)
-        self.verticalHeader().setDefaultSectionSize(24)
+        self.verticalHeader().setDefaultSectionSize(20)
         
         # Enable mouse tracking for hover events
         self.setMouseTracking(True)
@@ -681,6 +681,18 @@ class StatsTable(QTableWidget):
             confidence_order = {"high": 3, "medium": 2, "low": 1}
             self.move_data.sort(key=lambda x: confidence_order.get(x.confidence_level, 0), reverse=reverse)
     
+    def _format_large_number(self, n):
+        try:
+            n = int(n)
+        except Exception:
+            return str(n)
+        if n >= 1_000_000:
+            return f"{n/1_000_000:.1f}m"
+        elif n >= 1_000:
+            return f"{n/1_000:.1f}k"
+        else:
+            return str(n)
+
     # DataManager provides list-like stats objects; we just map.
     def populate(self, stats):
         self.setRowCount(len(stats))
@@ -709,10 +721,10 @@ class StatsTable(QTableWidget):
                 score_str,
                 f"{s.performance_score:.3f}",
                 f"{s.decisiveness_score:.3f}",
-                str(s.wins),
-                str(s.losses),
-                str(s.draws),
-                str(s.total_games),
+                self._format_large_number(s.wins),
+                self._format_large_number(s.losses),
+                self._format_large_number(s.draws),
+                self._format_large_number(s.total_games),
                 s.confidence_level,
             ]
             for c, text in enumerate(items):
@@ -1043,14 +1055,15 @@ class MainWindow(QMainWindow, ThemeMixin):
 
         splitter.addWidget(right_widget)
 
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
+        # Calculate optimal splitter sizes based on content
+        self._adjust_splitter_sizes(splitter)
 
         # Initial populate
         self._refresh_all()
 
         # --- keep ref ---
         self._zoom_slider = zoom_slider
+        self._splitter = splitter
 
     # ------------------------------------------------------------------
     #                          CONTROL PANEL
@@ -1403,11 +1416,92 @@ class MainWindow(QMainWindow, ThemeMixin):
         # Force board update to recalculate square sizes
         if hasattr(self, 'board'):
             self.board.update()
+        # Recalculate splitter sizes when window is resized
+        if hasattr(self, '_splitter'):
+            self._adjust_splitter_sizes(self._splitter)
+    
+    def showEvent(self, event):  # noqa: N802 – Qt signature
+        """Handle window show events to adjust splitter sizes after window is displayed"""
+        super().showEvent(event)
+        # Adjust splitter sizes after the window is shown to ensure all content is visible
+        if hasattr(self, '_splitter'):
+            # Use a timer to ensure the window is fully rendered before adjusting
+            QTimer.singleShot(100, lambda: self._adjust_splitter_sizes(self._splitter))
     
     def closeEvent(self, event):  # noqa: N802 – Qt signature
         # analysis_manager.stop_background_analysis() # This line was removed from the original file
         self._timer.stop()
         event.accept()
+
+    def _adjust_splitter_sizes(self, splitter):
+        """Adjust the splitter sizes to ensure all content is visible by default."""
+        # Calculate the total width needed for the table columns - more compact
+        table_total_width = 0
+        column_widths = [60, 55, 55, 55, 55, 55, 55, 55, 45]  # Compact widths for each column
+        
+        for i, width in enumerate(column_widths):
+            table_total_width += width
+        
+        # Add padding and margins for the table - reduced for compact design
+        table_total_width += 30  # Account for borders, padding, and scrollbars
+        
+        # Calculate the minimum width needed for the left side (board + controls)
+        # Board minimum size (including labels)
+        board_min_width = 230  # From ChessBoardWidget minimum size
+        
+        # Control panel minimum width (based on the controls layout)
+        # Calculate actual control panel width needed
+        control_min_width = 0
+        # Network selector + label: ~120px
+        control_min_width += 120
+        # Side buttons: ~100px
+        control_min_width += 100
+        # Min games + label: ~140px
+        control_min_width += 140
+        # Dataset selector + label: ~140px
+        control_min_width += 140
+        # Download button: ~80px
+        control_min_width += 80
+        # Export buttons: ~160px
+        control_min_width += 160
+        # Spacing and margins: ~60px
+        control_min_width += 60
+        
+        # Move list minimum width
+        move_list_min_width = 200
+        
+        # Left side total minimum width
+        left_min_width = max(board_min_width, control_min_width, move_list_min_width)
+        left_min_width += 20  # Account for margins and spacing
+        
+        # Calculate the optimal splitter sizes
+        total_min_width = left_min_width + table_total_width
+        
+        # Get the current window width
+        window_width = self.width()
+        
+        # If the window is too small, adjust the splitter to show all content
+        if window_width < total_min_width:
+            # Set the splitter to show all content by giving more space to the right side
+            # when the window is too narrow
+            left_ratio = left_min_width / total_min_width
+            right_ratio = table_total_width / total_min_width
+        else:
+            # When there's enough space, give a balanced layout
+            left_ratio = 0.6  # 60% for left side
+            right_ratio = 0.4  # 40% for right side
+        
+        # Calculate actual sizes
+        available_width = max(window_width, total_min_width)
+        left_size = int(available_width * left_ratio)
+        right_size = int(available_width * right_ratio)
+        
+        # Ensure minimum sizes are respected
+        left_size = max(left_size, left_min_width)
+        right_size = max(right_size, table_total_width)
+        
+        # Set the splitter sizes
+        splitter.setSizes([left_size, right_size])
 
 
 # ---------------------------------------------------------------------------
