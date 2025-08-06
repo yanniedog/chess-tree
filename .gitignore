@@ -181,3 +181,4 @@ cython_debug/
 .cursorindexingignore
 cache/stats.db
 /cache
+/cache

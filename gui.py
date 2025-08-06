@@ -110,6 +110,9 @@ class ChessBoardWidget(QWidget, ThemeMixin):
         # Highlighting state for table hover
         self.highlighted_square = None
         self.highlighted_path = set()  # Set of squares in the move path
+        
+        # Reference to stats table for highlighting
+        self.stats_table = None
 
     def _load_piece_images(self):
         """Load chess piece images from Wikipedia URLs."""
@@ -438,22 +441,29 @@ class ChessBoardWidget(QWidget, ThemeMixin):
         if self.selected_square is None and self.board.piece_at(sq):
             self.selected_square = sq
             self.legal_moves = [m.to_square for m in self.board.legal_moves if m.from_square == sq]
+            # Highlight corresponding moves in the table
+            if self.stats_table:
+                self.stats_table.highlight_moves_for_piece(sq)
         else:
             # Determine if this is a pawn promotion
             move = None
-            piece = self.board.piece_at(self.selected_square)
-            if piece and piece.piece_type == chess.PAWN:
-                # White pawn promotes on rank 8 (rank 7 in 0-indexed), black on rank 1 (rank 0)
-                to_rank = chess.square_rank(sq)
-                if (piece.color == chess.WHITE and to_rank == 7) or (piece.color == chess.BLACK and to_rank == 0):
-                    # Default to queen promotion
-                    move = chess.Move(self.selected_square, sq, promotion=chess.QUEEN)
-            if move is None:
-                move = chess.Move(self.selected_square, sq)
-            if move in self.board.legal_moves:
-                self.push_move(move)
+            if self.selected_square is not None:
+                piece = self.board.piece_at(self.selected_square)
+                if piece and piece.piece_type == chess.PAWN:
+                    # White pawn promotes on rank 8 (rank 7 in 0-indexed), black on rank 1 (rank 0)
+                    to_rank = chess.square_rank(sq)
+                    if (piece.color == chess.WHITE and to_rank == 7) or (piece.color == chess.BLACK and to_rank == 0):
+                        # Default to queen promotion
+                        move = chess.Move(self.selected_square, sq, promotion=chess.QUEEN)
+                if move is None:
+                    move = chess.Move(self.selected_square, sq)
+                if move in self.board.legal_moves:
+                    self.push_move(move)
             self.selected_square = None
             self.legal_moves = []
+            # Clear table highlighting when no piece is selected
+            if self.stats_table:
+                self.stats_table.clear_table_highlighting()
         self.update()
 
     def mouseMoveEvent(self, event):  # noqa: N802 – Qt signature
@@ -523,8 +533,13 @@ class ChessBoardWidget(QWidget, ThemeMixin):
     
     def clear_highlight(self):
         """Clear the table hover highlight."""
+        if self.highlighted_square is not None or self.highlighted_path:
+            logger.info("Clearing board highlighting")
         self.highlighted_square = None
         self.highlighted_path.clear()
+        # Also clear table highlighting for consistency
+        if self.stats_table:
+            self.stats_table.clear_table_highlighting()
         self.update()
 
 
@@ -698,8 +713,16 @@ class StatsTable(QTableWidget):
         self.setRowCount(len(stats))
         self.move_data = stats  # Store the stats for hover highlighting
         
-        # Create a temporary board to convert UCI moves to SAN
-        temp_board = chess.Board()
+        # Get the current board position from the main window
+        current_board = None
+        if hasattr(self, 'board_widget') and self.board_widget:
+            current_board = chess.Board(self.board_widget.get_fen())
+        else:
+            # Fallback to empty board if we can't get current position
+            current_board = chess.Board()
+        
+        # Store the board position used for populating the table
+        self.population_board = current_board
         
         for r, s in enumerate(stats):
             # Calculate win rate for color coding
@@ -708,10 +731,10 @@ class StatsTable(QTableWidget):
             # Format evaluation score as +0.23 or -0.45
             score_str = f"{s.evaluation_score/100:+.2f}" if s.evaluation_score != 0 else "0.00"
             
-            # Convert UCI move to SAN notation
+            # Convert UCI move to SAN notation using current board position
             try:
                 move = chess.Move.from_uci(s.move)
-                san_move = temp_board.san(move)
+                san_move = current_board.san(move)
             except Exception:
                 # Fallback to UCI if conversion fails
                 san_move = s.move
@@ -791,10 +814,27 @@ class StatsTable(QTableWidget):
                 try:
                     # Convert UCI move to chess.Move object
                     move = chess.Move.from_uci(move_uci)
+                    
+                    # Get square names for logging
+                    from_square_name = chess.square_name(move.from_square)
+                    to_square_name = chess.square_name(move.to_square)
+                    
+                    # Get the SAN move notation for logging using the same board position as when table was populated
+                    if hasattr(self, 'population_board') and self.population_board:
+                        san_move = self.population_board.san(move)
+                    else:
+                        # Fallback to current board position if population_board is not available
+                        current_board = chess.Board(self.board_widget.get_fen())
+                        san_move = current_board.san(move)
+                    
+                    # Log the correspondence between table move and board highlight
+                    logger.info(f"Table hover: Move '{san_move}' (UCI: {move_uci}) corresponds to board highlight from {from_square_name} to {to_square_name}")
+                    
                     # Highlight the full move path from origin to destination
                     self.board_widget.highlight_move_path(move.from_square, move.to_square)
-                except Exception:
-                    # If move conversion fails, clear highlighting
+                except Exception as e:
+                    # If move conversion fails, clear highlighting and log error
+                    logger.error(f"Failed to convert move {move_uci} for highlighting: {e}")
                     self.board_widget.clear_highlight()
         else:
             # If mouse is not over any item, clear highlighting
@@ -805,6 +845,81 @@ class StatsTable(QTableWidget):
         super().leaveEvent(event)
         if self.board_widget:
             self.board_widget.clear_highlight()
+        # Also clear table highlighting
+        self.clear_table_highlighting()
+    
+    def highlight_moves_for_piece(self, from_square):
+        """Highlight table rows that correspond to moves from a specific piece square."""
+        if not self.move_data:
+            return
+            
+        # Clear previous highlighting
+        self.clear_table_highlighting()
+        
+        # Get square name for logging
+        from_square_name = chess.square_name(from_square)
+        
+        # Find moves that start from the given square
+        highlighted_rows = []
+        highlighted_moves = []
+        for row, stat in enumerate(self.move_data):
+            try:
+                move = chess.Move.from_uci(stat.move)
+                if move.from_square == from_square:
+                    highlighted_rows.append(row)
+                    # Get SAN notation for logging using the same board position as when table was populated
+                    if hasattr(self, 'population_board') and self.population_board:
+                        san_move = self.population_board.san(move)
+                    else:
+                        # Fallback to current board position if population_board is not available
+                        current_board = chess.Board(self.board_widget.get_fen())
+                        san_move = current_board.san(move)
+                    highlighted_moves.append(san_move)
+            except Exception:
+                continue
+        
+        # Log the piece selection and corresponding table highlights
+        if highlighted_moves:
+            moves_str = ", ".join(highlighted_moves)
+            logger.info(f"Board piece selection: Piece on {from_square_name} selected, highlighting table moves: {moves_str}")
+        else:
+            logger.info(f"Board piece selection: Piece on {from_square_name} selected, but no corresponding moves found in table")
+        
+        # Highlight the found rows
+        for row in highlighted_rows:
+            for col in range(self.columnCount()):
+                item = self.item(row, col)
+                if item:
+                    # Store original background color
+                    if not hasattr(item, '_original_background'):
+                        item._original_background = item.background()
+                    # Set highlight color
+                    item.setBackground(QColor(255, 255, 0, 100))  # Light yellow highlight
+        self.update()
+    
+    def clear_table_highlighting(self):
+        """Clear all table row highlighting."""
+        # Check if there's any highlighting to clear
+        has_highlighting = False
+        for row in range(self.rowCount()):
+            for col in range(self.columnCount()):
+                item = self.item(row, col)
+                if item and hasattr(item, '_original_background'):
+                    has_highlighting = True
+                    break
+            if has_highlighting:
+                break
+        
+        if has_highlighting:
+            logger.info("Clearing table highlighting")
+        
+        for row in range(self.rowCount()):
+            for col in range(self.columnCount()):
+                item = self.item(row, col)
+                if item and hasattr(item, '_original_background'):
+                    item.setBackground(item._original_background)
+                    delattr(item, '_original_background')
+        self.update()
     
     def mousePressEvent(self, event):
         """Handle mouse click events to play moves on the board."""
@@ -1045,6 +1160,8 @@ class MainWindow(QMainWindow, ThemeMixin):
         self.stats_table = StatsTable()
         # Connect the table to the board for hover highlighting
         self.stats_table.board_widget = self.board
+        # Connect the board to the table for piece highlighting
+        self.board.stats_table = self.stats_table
         right_layout.addWidget(self.stats_table)
 
         self.status = QLabel("Ready")
